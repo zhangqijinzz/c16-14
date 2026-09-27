@@ -17,6 +17,25 @@ class FakeImageService implements ImageService {
   demo() { return this.asset; }
 }
 
+class DeferredImageService implements ImageService {
+  private pending = new Map<string, { resolve: (asset: ImageAsset) => void; reject: (error: Error) => void }>();
+  private readonly demoAsset: ImageAsset = { src: 'data:image/svg+xml,demo', width: 1200, height: 800, name: 'demo.svg' };
+  readFile(file: File) {
+    return new Promise<ImageAsset>((resolve, reject) => {
+      this.pending.set(file.name, { resolve, reject });
+    });
+  }
+  resolveImport(name: string) {
+    this.pending.get(name)?.resolve({ src: `data:${name}`, width: 800, height: 600, name });
+    this.pending.delete(name);
+  }
+  rejectImport(name: string, message: string) {
+    this.pending.get(name)?.reject(new Error(message));
+    this.pending.delete(name);
+  }
+  demo() { return this.demoAsset; }
+}
+
 describe('FrameSenseViewModel', () => {
   let repository: MemoryRepository;
   let vm: FrameSenseViewModel;
@@ -48,5 +67,63 @@ describe('FrameSenseViewModel', () => {
     expect(vm.getSnapshot().phase).toBe('error');
     expect(vm.getSnapshot().document.image).not.toBeNull();
     expect(vm.getSnapshot().error).toContain('本地保存失败');
+  });
+});
+
+describe('FrameSenseViewModel 异步导入竞态', () => {
+  let repository: MemoryRepository;
+  let images: DeferredImageService;
+  let vm: FrameSenseViewModel;
+  const file = (name: string) => new File(['x'], name, { type: 'image/png' });
+  beforeEach(() => { repository = new MemoryRepository(); images = new DeferredImageService(); vm = new FrameSenseViewModel(repository, images); });
+
+  it('shows which file is loading without clearing the current image', () => {
+    vm.loadDemo();
+    void vm.importImage(file('big.png'));
+    expect(vm.getSnapshot().phase).toBe('loading');
+    expect(vm.getSnapshot().notice).toContain('big.png');
+    expect(vm.getSnapshot().document.image?.name).toBe('demo.svg');
+  });
+
+  it('discards a late import result that arrives after loadDemo', async () => {
+    const slow = vm.importImage(file('slow.png'));
+    vm.loadDemo();
+    images.resolveImport('slow.png');
+    await slow;
+    expect(vm.getSnapshot().document.image?.name).toBe('demo.svg');
+    expect(vm.getSnapshot().phase).toBe('editing');
+  });
+
+  it('applies only the newest import when two are in flight', async () => {
+    const first = vm.importImage(file('first.png'));
+    const second = vm.importImage(file('second.png'));
+    images.resolveImport('first.png');
+    await first;
+    expect(vm.getSnapshot().document.image).toBeNull();
+    expect(vm.getSnapshot().phase).toBe('loading');
+    images.resolveImport('second.png');
+    await second;
+    expect(vm.getSnapshot().document.image?.name).toBe('second.png');
+    expect(vm.getSnapshot().phase).toBe('editing');
+  });
+
+  it('keeps the usable image when the current import fails', async () => {
+    vm.loadDemo();
+    const failing = vm.importImage(file('broken.png'));
+    images.rejectImport('broken.png', '图片格式无法识别。');
+    await failing;
+    expect(vm.getSnapshot().document.image?.name).toBe('demo.svg');
+    expect(vm.getSnapshot().phase).toBe('editing');
+    expect(vm.getSnapshot().error).toBe('图片格式无法识别。');
+  });
+
+  it('ignores a stale import failure after a newer load', async () => {
+    const stale = vm.importImage(file('stale.png'));
+    vm.loadDemo();
+    images.rejectImport('stale.png', '图片读取失败。');
+    await stale;
+    expect(vm.getSnapshot().document.image?.name).toBe('demo.svg');
+    expect(vm.getSnapshot().error).toBeNull();
+    expect(vm.getSnapshot().phase).toBe('editing');
   });
 });

@@ -9,6 +9,7 @@ type Listener = () => void;
 export class FrameSenseViewModel {
   private state: ViewState = { phase: 'loading', document: structuredClone(EMPTY_DOCUMENT), compareOpen: false, notice: '', error: null };
   private readonly listeners = new Set<Listener>();
+  private importSeq = 0;
 
   constructor(private readonly repository: FrameRepository, private readonly imageService: ImageService) {}
 
@@ -44,17 +45,24 @@ export class FrameSenseViewModel {
   }
 
   async importImage(file: File): Promise<void> {
-    this.patch({ phase: 'loading', notice: '正在载入图片…', error: null });
+    const request = ++this.importSeq;
+    this.patch({ phase: 'loading', notice: `正在载入「${file.name}」…`, error: null });
     try {
       const image = await this.imageService.readFile(file);
+      if (request !== this.importSeq) return; // 已有更新的载入请求，丢弃晚到的旧结果
       const document: FrameDocument = { ...structuredClone(EMPTY_DOCUMENT), image };
-      this.persist(document, '图片已载入，可以开始构图。');
+      this.persist(document, `图片「${image.name}」已载入，可以开始构图。`);
     } catch (error) {
-      this.patch({ phase: 'error', error: error instanceof Error ? error.message : '图片载入失败。' });
+      if (request !== this.importSeq) return; // 旧请求的失败不影响当前画面
+      this.patch({
+        phase: this.state.document.image ? 'editing' : 'error',
+        error: error instanceof Error ? error.message : '图片载入失败。',
+      });
     }
   }
 
   loadDemo(): void {
+    this.importSeq += 1; // 让进行中的导入结果失效，避免晚到后盖回示例图
     this.persist({ ...structuredClone(EMPTY_DOCUMENT), image: this.imageService.demo() }, '示例图片已载入。');
   }
 
